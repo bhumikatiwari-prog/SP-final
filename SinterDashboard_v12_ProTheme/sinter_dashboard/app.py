@@ -337,6 +337,19 @@ last_ri  = sq_raw['RI'].dropna().iloc[-1]  if 'RI'  in sq_raw.columns else 70.1
 ti_ok  = last_ti  >= 78; rdi_ok = last_rdi <= 25; ri_ok  = last_ri  >= 68
 overall= '🟢 NORMAL' if (ti_ok and rdi_ok and ri_ok) else ('🟡 CAUTION' if sum([ti_ok,rdi_ok,ri_ok])>=2 else '🔴 ALERT')
 
+# Latest daily production / asking rate, for the always-visible top-nav badge
+_nav_prod_html = ''
+if 'Production' in pp_raw.columns and 'Date' in pp_raw.columns:
+    from date_utils import parse_dates_robust as _pdr_nav
+    _nav_prod = pp_raw[['Date','Production']].copy()
+    _nav_prod['Date']       = _pdr_nav(_nav_prod['Date'])
+    _nav_prod['Production'] = pd.to_numeric(_nav_prod['Production'], errors='coerce')
+    _nav_prod = _nav_prod.dropna().sort_values('Date')
+    if len(_nav_prod):
+        _nav_rate = _nav_prod['Production'].iloc[-1]
+        _nav_rate_ok = 2200 <= _nav_rate <= 4000
+        _nav_prod_html = f'<div class="nav-badge">RATE&nbsp;{_nav_rate:,.0f} t/d {"✅" if _nav_rate_ok else "⚠️"}</div>'
+
 _logo_html = (f'<img src="data:image/png;base64,{_LOGO_B64}" alt="Jindal Steel"/>'
               if _LOGO_B64 else '⚙️')
 
@@ -354,11 +367,13 @@ st.markdown(f"""
     <div class="nav-badge">TI&nbsp;&nbsp;{last_ti:.2f} {'✅' if ti_ok else '⚠️'}</div>
     <div class="nav-badge">RDI&nbsp;{last_rdi:.2f} {'✅' if rdi_ok else '⚠️'}</div>
     <div class="nav-badge">RI&nbsp;&nbsp;{last_ri:.2f} {'✅' if ri_ok else '⚠️'}</div>
+    {_nav_prod_html}
     <div class="nav-badge" style="border-color:{'#5FB878' if '🟢' in overall else ('#D4A23B' if '🟡' in overall else '#D4574A')}">{overall}</div>
     {render_live_status_badge(_rt_info if "_rt_info" in dir() else {"data_age_str":"—","current_mtime":0}, st.session_state.get("data_updated",False))}
   </div>
 </div>
 """, unsafe_allow_html=True)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PAGE 1 — EXECUTIVE DASHBOARD
@@ -384,6 +399,99 @@ if '🏠' in page:
         st.plotly_chart(gauge(avg_ri, 68.0,'>=','Reducibility Index (RI)',TC['RI']), use_container_width=True)
     with c4:
         st.plotly_chart(gauge(bf_score, 85.0,'>=','BF Suitability Score','#C9952C'), use_container_width=True)
+
+    # ── PRODUCTION / ASKING RATE — live from Process_Parameters_Clean ──────
+    st.markdown('<div class="section-header">🏭 SINTER PRODUCTION — ASKING RATE (LIVE)</div>', unsafe_allow_html=True)
+    from date_utils import parse_dates_robust
+    _pp_date_col = 'Date' if 'Date' in pp_raw.columns else None
+    if 'Production' in pp_raw.columns and _pp_date_col:
+        _pp_prod = pp_raw[[_pp_date_col,'Production']].copy()
+        _pp_prod[_pp_date_col] = parse_dates_robust(_pp_prod[_pp_date_col])
+        _pp_prod['Production'] = pd.to_numeric(_pp_prod['Production'], errors='coerce')
+        _pp_prod = _pp_prod.dropna(subset=[_pp_date_col,'Production']).sort_values(_pp_date_col)
+        # Respect the sidebar date filter so this stays in sync with the rest of the page
+        _pp_prod = _pp_prod[(_pp_prod[_pp_date_col]>=d_from) & (_pp_prod[_pp_date_col]<=d_to)]
+    else:
+        _pp_prod = pd.DataFrame(columns=[_pp_date_col or 'Date','Production'])
+
+    if len(_pp_prod) == 0:
+        st.info('No production data available for the selected date range.')
+    else:
+        _latest_row   = _pp_prod.iloc[-1]
+        _latest_day   = _latest_row['Production']           # t/day (asking/quoted production rate)
+        _latest_hr    = _latest_day / 24.0                  # t/hr
+        _latest_date  = _latest_row[_pp_date_col]
+        _ma7          = _pp_prod['Production'].tail(7).mean()
+        _ma30         = _pp_prod['Production'].tail(30).mean()
+        _delta_vs_ma7 = _latest_day - _ma7
+        _prod_lo, _prod_hi = 2200, 4000           # plant operating band, t/day (matches process_monitor.py)
+        _prod_target       = 2800                 # nameplate / budgeted daily asking rate, t/day
+        _rate_ok      = _prod_lo <= _latest_day <= _prod_hi
+        _vs_target    = (_latest_day/_prod_target - 1)*100
+
+        r1,r2,r3,r4 = st.columns(4)
+        with r1:
+            st.markdown(f"""
+            <div class="kpi-card" style="--accent:#4a90d9">
+              <div>
+                <div class="kpi-label">Current Asking Rate (Latest Day)</div>
+                <div class="kpi-value">{_latest_day:,.0f} <span style="font-size:1rem;color:#8A8478">t/day</span></div>
+                <div class="kpi-sub" style="color:#8A8478">≈ {_latest_hr:,.1f} t/hr  ·  {pd.Timestamp(_latest_date).strftime('%d %b %Y')}</div>
+              </div>
+              <div class="kpi-delta" style="color:{'#5FB878' if _delta_vs_ma7>=0 else '#D4574A'}">
+                {'▲' if _delta_vs_ma7>=0 else '▼'} {abs(_delta_vs_ma7):,.0f} t/day vs 7d avg
+              </div>
+            </div>""", unsafe_allow_html=True)
+        with r2:
+            st.markdown(f"""
+            <div class="kpi-card" style="--accent:#f97316">
+              <div>
+                <div class="kpi-label">7-Day Average Rate</div>
+                <div class="kpi-value">{_ma7:,.0f} <span style="font-size:1rem;color:#8A8478">t/day</span></div>
+                <div class="kpi-sub" style="color:#8A8478">≈ {_ma7/24:,.1f} t/hr running average</div>
+              </div>
+              <div class="kpi-delta" style="color:#8A8478">30d avg: {_ma30:,.0f} t/day</div>
+            </div>""", unsafe_allow_html=True)
+        with r3:
+            st.markdown(f"""
+            <div class="kpi-card" style="--accent:#C9952C">
+              <div>
+                <div class="kpi-label">vs Budgeted Asking Rate</div>
+                <div class="kpi-value" style="color:{'#5FB878' if _vs_target>=0 else '#D4574A'}">{_vs_target:+.1f}%</div>
+                <div class="kpi-sub" style="color:#8A8478">Target: {_prod_target:,} t/day</div>
+              </div>
+              <div class="kpi-delta {'kpi-ok' if _vs_target>=0 else 'kpi-bad'}">{'✅ Above target' if _vs_target>=0 else '⚠️ Below target'}</div>
+            </div>""", unsafe_allow_html=True)
+        with r4:
+            st.markdown(f"""
+            <div class="kpi-card" style="--accent:{'#5FB878' if _rate_ok else '#D4574A'}">
+              <div>
+                <div class="kpi-label">Operating Band Status</div>
+                <div class="kpi-value" style="font-size:1.3rem">{'🟢 NORMAL' if _rate_ok else '🔴 OUT OF BAND'}</div>
+                <div class="kpi-sub" style="color:#8A8478">Band: {_prod_lo:,}–{_prod_hi:,} t/day</div>
+              </div>
+              <div class="kpi-delta" style="color:#8A8478">Updates each refresh cycle</div>
+            </div>""", unsafe_allow_html=True)
+
+        # Live trend — daily rate with 7d/30d moving average and operating band
+        _fig_rate = go.Figure()
+        _fig_rate.add_trace(go.Scatter(
+            x=_pp_prod[_pp_date_col], y=_pp_prod['Production'], mode='markers',
+            name='Daily Asking Rate', marker=dict(color='#4a90d9', size=4, opacity=0.5)))
+        _fig_rate.add_trace(go.Scatter(
+            x=_pp_prod[_pp_date_col], y=_pp_prod['Production'].rolling(7,min_periods=1).mean(),
+            mode='lines', name='7d Moving Avg', line=dict(color='#f97316', width=2.5)))
+        _fig_rate.add_trace(go.Scatter(
+            x=_pp_prod[_pp_date_col], y=_pp_prod['Production'].rolling(30,min_periods=1).mean(),
+            mode='lines', name='30d Moving Avg', line=dict(color='#a855f7', width=1.8, dash='dot')))
+        _fig_rate.add_hline(y=_prod_target, line=dict(color='#C9952C', width=1.5, dash='dash'),
+                             annotation_text=f'Budgeted Rate {_prod_target:,} t/day',
+                             annotation_font=dict(color='#C9952C', size=10))
+        _fig_rate.add_hrect(y0=_prod_lo, y1=_prod_hi, fillcolor='#4a90d9', opacity=0.04, line_width=0)
+        _fig_rate.update_layout(**clayout(title='Daily Sinter Production / Asking Rate — Live Trend', height=320))
+        _fig_rate.update_yaxes(title_text='t / day')
+        st.plotly_chart(_fig_rate, use_container_width=True)
+        st.caption('🔄 Reflects the latest row in Process_Parameters_Clean for the selected date range and refreshes automatically with the sidebar auto-refresh interval / live data updates.')
 
     st.markdown('<div class="section-header">📊 PERFORMANCE INDICATORS</div>', unsafe_allow_html=True)
     p1,p2,p3,p4,p5,p6 = st.columns(6)
